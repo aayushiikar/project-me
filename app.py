@@ -2,7 +2,6 @@ import streamlit as st
 from elasticsearch import Elasticsearch
 from sentence_transformers import SentenceTransformer
 import time
-# Removed: from jina_reranker import JinaReranker # THIS IS NO LONGER USED
 
 st.set_page_config(
     page_title="Amazon Kids Product Search",
@@ -10,173 +9,207 @@ st.set_page_config(
     layout="wide"
 )
 
-# Credentials from Streamlit secrets
+# ============================================================
+# CREDENTIALS FROM STREAMLIT SECRETS
+# ============================================================
 try:
     CLOUD_ID = st.secrets["CLOUD_ID"]
     USERNAME = st.secrets["USERNAME"]
     PASSWORD = st.secrets["PASSWORD"]
-    # Removed: JINA_API_KEY = st.secrets["JINA_API_KEY"] # No longer needed for internal reranker
-except KeyError as e: # Changed from generic 'except' to specific 'KeyError'
+except KeyError as e:
     st.error(f"⚠️ Missing secret: '{e}'. Please configure CLOUD_ID, USERNAME, and PASSWORD in Streamlit Cloud dashboard.")
     st.stop()
 
 INDEX_NAME = "amazon_2020_bbq"
 
-# Initialize connections
+# ============================================================
+# INITIALIZE CONNECTIONS (cached so they only run once)
+# ============================================================
 @st.cache_resource
 def init_elasticsearch():
     return Elasticsearch(
         cloud_id=CLOUD_ID,
-        basic_auth=(USERNAME, PASSWORD)
+        basic_auth=(USERNAME, PASSWORD),
+        request_timeout=60
     )
 
 @st.cache_resource
 def init_model():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-# Removed: init_jina_reranker function # No longer needed
-# Removed: jina_reranker_client = init_jina_reranker(JINA_API_KEY) # No longer needed
-
 client = init_elasticsearch()
-model = init_model()
+model  = init_model()
 
-# Search functions
+# ============================================================
+# SEARCH FUNCTIONS
+# ============================================================
 def bm25_search(query, k=10):
-    response = client.search(
-        index=INDEX_NAME,
-        body={
-            "size": k,
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"],
-                    "type": "best_fields"
-                }
-            },
-            "_source": ["product_name", "brand", "price", "category", "image_url"]
-        }
-    )
-    return response["hits"]["hits"]
+    try:
+        response = client.search(
+            index=INDEX_NAME,
+            body={
+                "size": k,
+                "query": {
+                    "multi_match": {
+                        "query": query,
+                        "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"],
+                        "type": "best_fields"
+                    }
+                },
+                "_source": ["product_name", "brand", "price", "category", "image_url"]
+            }
+        )
+        return response["hits"]["hits"]
+    except Exception as e:
+        st.error(f"BM25 search error: {e}")
+        return []
 
 def vector_search(query, k=10):
-    query_vector = model.encode(query).tolist()
-    response = client.search(
-        index=INDEX_NAME,
-        body={
-            "size": k,
-            "knn": {
-                "field": "embedding",
-                "query_vector": query_vector,
-                "k": k,
-                "num_candidates": 100
-            },
-            "_source": ["product_name", "brand", "price", "category", "image_url"]
-        }
-    )
-    return response["hits"]["hits"]
+    try:
+        query_vector = model.encode(query).tolist()
+        response = client.search(
+            index=INDEX_NAME,
+            body={
+                "size": k,
+                "knn": {
+                    "field": "embedding",
+                    "query_vector": query_vector,
+                    "k": k,
+                    "num_candidates": 100
+                },
+                "_source": ["product_name", "brand", "price", "category", "image_url"]
+            }
+        )
+        return response["hits"]["hits"]
+    except Exception as e:
+        st.error(f"Vector search error: {e}")
+        return []
 
 def hybrid_rrf_search(query, k=10):
-    query_vector = model.encode(query).tolist()
-    response = client.search(
-        index=INDEX_NAME,
-        body={
-            "size": k,
-            "retriever": {
-                "rrf": {
-                    "retrievers": [
-                        {
-                            "standard": {
-                                "query": {
-                                    "multi_match": {
-                                        "query": query,
-                                        "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
-                                    }
-                                }
-                            }
-                        },
-                        {
-                            "knn": {
-                                "field": "embedding",
-                                "query_vector": query_vector,
-                                "k": 50,
-                                "num_candidates": 100
-                            }
-                        }
-                    ],
-                    "rank_window_size": 100
-                }
-            },
-            "_source": ["product_name", "brand", "price", "category", "image_url"]
-        }
-    )
-    return response["hits"]["hits"]
-
-# --- REVERTED AND FIXED: full_pipeline_search to use internal Elasticsearch reranker ---
-def full_pipeline_search(query, k=10):
-    query_vector = model.encode(query).tolist()
-    response = client.search(
-        index=INDEX_NAME,
-        body={
-            "size": k,
-            "retriever": {
-                "text_similarity_reranker": {
-                    "retriever": {
-                        "rrf": {
-                            "retrievers": [
-                                {
-                                    "standard": {
-                                        "query": {
-                                            "multi_match": {
-                                                "query": query,
-                                                "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
-                                            }
+    try:
+        query_vector = model.encode(query).tolist()
+        response = client.search(
+            index=INDEX_NAME,
+            body={
+                "size": k,
+                "retriever": {
+                    "rrf": {
+                        "retrievers": [
+                            {
+                                "standard": {
+                                    "query": {
+                                        "multi_match": {
+                                            "query": query,
+                                            "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
                                         }
                                     }
-                                },
-                                {
-                                    "knn": {
-                                        "field": "embedding",
-                                        "query_vector": query_vector,
-                                        "k": 50,
-                                        "num_candidates": 100
-                                    }
                                 }
-                            ],
-                            "rank_window_size": 100
-                        }
-                    },
-                    "field": "document_text",
-                    "inference_id": "jina_reranker_v3",
-                    "inference_text": query,
-                    "rank_window_size": 50
-                }
-            },
-            # IMPORTANT FIX: Include 'document_text' so the internal reranker can use it
-            "_source": ["product_name", "brand", "price", "category", "image_url", "document_text"]
-        }
-    )
-    return response["hits"]["hits"]
-# --- END REVERTED AND FIXED full_pipeline_search ---
+                            },
+                            {
+                                "knn": {
+                                    "field": "embedding",
+                                    "query_vector": query_vector,
+                                    "k": 50,
+                                    "num_candidates": 100
+                                }
+                            }
+                        ],
+                        "rank_window_size": 100
+                    }
+                },
+                "_source": ["product_name", "brand", "price", "category", "image_url"]
+            }
+        )
+        return response["hits"]["hits"]
+    except Exception as e:
+        st.error(f"Hybrid RRF search error: {e}")
+        return []
 
+def full_pipeline_search(query, k=10):
+    try:
+        query_vector = model.encode(query).tolist()
+        response = client.search(
+            index=INDEX_NAME,
+            body={
+                "size": k,
+                "retriever": {
+                    "text_similarity_reranker": {
+                        "retriever": {
+                            "rrf": {
+                                "retrievers": [
+                                    {
+                                        "standard": {
+                                            "query": {
+                                                "multi_match": {
+                                                    "query": query,
+                                                    "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
+                                                }
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "knn": {
+                                            "field": "embedding",
+                                            "query_vector": query_vector,
+                                            "k": 50,
+                                            "num_candidates": 100
+                                        }
+                                    }
+                                ],
+                                "rank_window_size": 100
+                            }
+                        },
+                        "field": "document_text",
+                        "inference_id": "jina_reranker_v3",
+                        "inference_text": query,
+                        "rank_window_size": 50
+                    }
+                },
+                # document_text MUST be in _source for the reranker to work
+                "_source": ["product_name", "brand", "price", "category", "image_url", "document_text"]
+            }
+        )
+        return response["hits"]["hits"]
+    except Exception as e:
+        st.error(f"Full Pipeline search error: {e}")
+        st.warning("💡 Falling back to Hybrid RRF...")
+        return hybrid_rrf_search(query, k=k)
 
-# UI
+# ============================================================
+# UI - HEADER
+# ============================================================
 st.title("🎨 Amazon Kids Product Search")
-st.markdown("### Powered by BBQ Quantization + Hybrid RRF + **Elasticsearch's Internal JinaAI Reranker**") # Adjusted description
+st.markdown("### Powered by BBQ Quantization + Hybrid RRF + JinaAI Reranker")
 st.markdown("---")
 
-# --- NEW: Add empty query check (moved to top of interaction flow) ---
+# ============================================================
+# SEARCH BAR (before sidebar so st.stop() works cleanly)
+# ============================================================
 query = st.text_input(
-    "Search for kids products:",
+    "🔍 Search for kids products:",
     value=st.session_state.get("query", ""),
     placeholder="e.g., LEGO sets, educational toys, board games..."
 )
 
-if not query:
-    st.info("Enter a search query to find products.")
+# Stop here if query is empty - prevents BadRequestError
+if not query or not query.strip():
+    st.info("👆 Enter a search query above to find products!")
+    st.markdown("### 💡 Try searching for:")
+    cols = st.columns(4)
+    suggestions = [
+        "Hot Wheels race track", "Barbie dolls",
+        "LEGO Star Wars", "educational STEM toys",
+        "coloring books", "Pokemon plush",
+        "board games family", "outdoor sports toys"
+    ]
+    for i, sug in enumerate(suggestions):
+        with cols[i % 4]:
+            st.markdown(f"- {sug}")
     st.stop()
-# --- END NEW: Add empty query check ---
 
-# Sidebar
+# ============================================================
+# SIDEBAR (after query check)
+# ============================================================
 st.sidebar.header("⚙️ Configuration")
 comparison_mode = st.sidebar.checkbox("🔥 Compare All Methods", value=False)
 
@@ -188,10 +221,10 @@ if not comparison_mode:
 else:
     search_method = None
 
-num_results = st.sidebar.slider("Results", 3, 12, 5)
+num_results = st.sidebar.slider("Number of Results", 3, 12, 5)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**💡 Try these:**")
+st.sidebar.markdown("**💡 Quick Searches:**")
 examples = [
     "Hot Wheels race track",
     "Barbie dolls",
@@ -204,86 +237,114 @@ examples = [
 ]
 
 for ex in examples:
-    if st.sidebar.button(ex, key=ex):
+    if st.sidebar.button(ex, key=f"btn_{ex}"):
         st.session_state["query"] = ex
+        st.rerun()
 
-
-# Comparison mode
-if comparison_mode: # 'query' check already done above
-    st.markdown("### 🔬 Method Comparison")
+# ============================================================
+# COMPARISON MODE
+# ============================================================
+if comparison_mode:
+    st.markdown(f"### 🔬 Comparing all methods for: `{query}`")
 
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown("**📝 BM25**")
-        start = time.time()
-        bm25_res = bm25_search(query, k=num_results)
-        bm25_time = (time.time() - start) * 1000
+        st.markdown("**📝 BM25 Keyword**")
+        with st.spinner("Searching..."):
+            start = time.time()
+            bm25_res = bm25_search(query, k=num_results)
+            bm25_time = (time.time() - start) * 1000
         st.metric("Latency", f"{bm25_time:.0f}ms")
+        st.caption(f"{len(bm25_res)} results")
         for i, hit in enumerate(bm25_res, 1):
             s = hit["_source"]
-            st.markdown(f"**{i}.** {s['product_name'][:40]}...")
+            name = s.get('product_name', 'N/A')
+            st.markdown(f"**{i}.** {name[:45]}{'...' if len(name) > 45 else ''}")
             st.caption(f"${s.get('price', 0):.2f}")
 
     with col2:
-        st.markdown("**🧠 Vector**")
-        start = time.time()
-        vec_res = vector_search(query, k=num_results)
-        vec_time = (time.time() - start) * 1000
+        st.markdown("**🧠 Vector Semantic**")
+        with st.spinner("Searching..."):
+            start = time.time()
+            vec_res = vector_search(query, k=num_results)
+            vec_time = (time.time() - start) * 1000
         st.metric("Latency", f"{vec_time:.0f}ms")
+        st.caption(f"{len(vec_res)} results")
         for i, hit in enumerate(vec_res, 1):
             s = hit["_source"]
-            st.markdown(f"**{i}.** {s['product_name'][:40]}...")
+            name = s.get('product_name', 'N/A')
+            st.markdown(f"**{i}.** {name[:45]}{'...' if len(name) > 45 else ''}")
             st.caption(f"${s.get('price', 0):.2f}")
 
     with col3:
-        st.markdown("**🔀 Hybrid**")
-        start = time.time()
-        hyb_res = hybrid_rrf_search(query, k=num_results)
-        hyb_time = (time.time() - start) * 1000
+        st.markdown("**🔀 Hybrid RRF**")
+        with st.spinner("Searching..."):
+            start = time.time()
+            hyb_res = hybrid_rrf_search(query, k=num_results)
+            hyb_time = (time.time() - start) * 1000
         st.metric("Latency", f"{hyb_time:.0f}ms")
+        st.caption(f"{len(hyb_res)} results")
         for i, hit in enumerate(hyb_res, 1):
             s = hit["_source"]
-            st.markdown(f"**{i}.** {s['product_name'][:40]}...")
+            name = s.get('product_name', 'N/A')
+            st.markdown(f"**{i}.** {name[:45]}{'...' if len(name) > 45 else ''}")
             st.caption(f"${s.get('price', 0):.2f}")
 
     with col4:
-        st.markdown("**🚀 Pipeline**")
-        start = time.time()
-        pip_res = full_pipeline_search(query, k=num_results)
-        pip_time = (time.time() - start) * 1000
+        st.markdown("**🚀 Full Pipeline**")
+        with st.spinner("Reranking with Jina AI..."):
+            start = time.time()
+            pip_res = full_pipeline_search(query, k=num_results)
+            pip_time = (time.time() - start) * 1000
         st.metric("Latency", f"{pip_time:.0f}ms")
+        st.caption(f"{len(pip_res)} results")
         for i, hit in enumerate(pip_res, 1):
             s = hit["_source"]
-            st.markdown(f"**{i}.** {s['product_name'][:40]}...")
+            name = s.get('product_name', 'N/A')
+            st.markdown(f"**{i}.** {name[:45]}{'...' if len(name) > 45 else ''}")
             st.caption(f"${s.get('price', 0):.2f}")
 
     st.markdown("---")
-    st.success("💡 Full Pipeline reranks for maximum relevance using Elasticsearch's internal Jina AI!")
+    st.success("💡 Full Pipeline = Hybrid RRF candidates → Jina AI reranked for maximum relevance!")
 
-# Single method mode
-elif not comparison_mode and search_method: # 'query' check already done above
+# ============================================================
+# SINGLE METHOD MODE
+# ============================================================
+elif not comparison_mode and search_method:
     funcs = {
-        "Full Pipeline": full_pipeline_search,
-        "Hybrid RRF": hybrid_rrf_search,
-        "Vector Semantic": vector_search,
-        "BM25 Keyword": bm25_search
+        "Full Pipeline":    full_pipeline_search,
+        "Hybrid RRF":       hybrid_rrf_search,
+        "Vector Semantic":  vector_search,
+        "BM25 Keyword":     bm25_search
     }
 
-    with st.spinner(f"Searching..."):
-        start = time.time()
+    method_icons = {
+        "Full Pipeline":    "🚀",
+        "Hybrid RRF":       "🔀",
+        "Vector Semantic":  "🧠",
+        "BM25 Keyword":     "📝"
+    }
+
+    st.markdown(f"### {method_icons[search_method]} {search_method} results for: `{query}`")
+
+    with st.spinner(f"Searching with {search_method}..."):
+        start   = time.time()
         results = funcs[search_method](query, k=num_results)
         latency = (time.time() - start) * 1000
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("⏱️ Latency", f"{latency:.0f}ms")
-    col2.metric("📊 Results", len(results))
-    col3.metric("🔧 Method", search_method)
-    col4.metric("🎯 Storage", "BBQ int8")
+    # Metrics row
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("⏱️ Latency",  f"{latency:.0f}ms")
+    m2.metric("📊 Results",  len(results))
+    m3.metric("🔧 Method",   search_method)
+    m4.metric("🎯 Storage",  "BBQ int8")
 
     st.markdown("---")
 
-    if results:
+    if not results:
+        st.warning("No results found. Try a different search term.")
+    else:
         for i, hit in enumerate(results, 1):
             s = hit["_source"]
 
@@ -291,7 +352,7 @@ elif not comparison_mode and search_method: # 'query' check already done above
 
             with col_img:
                 img = s.get("image_url", "")
-                if img and img.startswith("http"):
+                if img and str(img).startswith("http"):
                     try:
                         st.image(img, width=120)
                     except:
@@ -300,28 +361,53 @@ elif not comparison_mode and search_method: # 'query' check already done above
                     st.write("🖼️")
 
             with col_info:
-                st.markdown(f"### {i}. {s['product_name']}")
+                product_name = s.get('product_name', 'Unknown Product')
+                st.markdown(f"### {i}. {product_name}")
+
                 d1, d2, d3, d4 = st.columns(4)
-                d1.markdown(f"**Brand:** {s.get('brand', 'N/A') if s.get('brand') != 'nan' else 'N/A'}")
-                d2.markdown(f"**Price:** ${s.get('price', 0):.2f}")
-                d3.markdown(f"**Category:** {s.get('category', 'N/A')[:40] if s.get('category') != 'nan' else 'N/A'}")
-                d4.markdown(f"**Score:** {hit['_score']:.3f}")
+
+                brand = s.get('brand', 'N/A')
+                brand = 'N/A' if str(brand) in ['nan', 'None', ''] else brand
+
+                category = s.get('category', 'N/A')
+                category = 'N/A' if str(category) in ['nan', 'None', ''] else str(category)[:40]
+
+                price = s.get('price', 0)
+                try:
+                    price = float(price)
+                except:
+                    price = 0.0
+
+                score = hit.get('_score', 0)
+                try:
+                    score = float(score) if score is not None else 0.0
+                except:
+                    score = 0.0
+
+                d1.markdown(f"**Brand:** {brand}")
+                d2.markdown(f"**Price:** ${price:.2f}")
+                d3.markdown(f"**Category:** {category}")
+                d4.markdown(f"**Score:** {score:.4f}")
 
             st.markdown("---")
 
-# Sidebar footer
+# ============================================================
+# SIDEBAR FOOTER
+# ============================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📊 Architecture")
 st.sidebar.markdown("""
-**3-Stage Pipeline (Elasticsearch Internal Reranker):**
-1. Hybrid RRF (BM25 + Vector) from Elasticsearch
-2. **Elasticsearch's Internal `text_similarity_reranker` (`jina_reranker_v3`)**
-3. Final Top K Results
+**3-Stage Pipeline:**
+1. 🔍 BM25 Keyword Search
+2. 🧠 Vector Semantic Search  
+3. 🔀 Hybrid RRF Fusion
+4. 🚀 Jina AI Reranker v3
 
 **Features:**
-- BBQ int8_hnsw (75% savings) in Elasticsearch
-- Semantic + keyword fusion (Hybrid RRF)
-- Cross-encoder reranking (via Elasticsearch's ML features)
+- BBQ int8_hnsw (75% storage savings)
+- Semantic + keyword fusion
+- Cross-encoder reranking via Jina AI
+- Elasticsearch native inference
 """)
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Elastic Blogathon 2026**")
+st.sidebar.markdown("**🏆 Elastic Blogathon 2026**")
