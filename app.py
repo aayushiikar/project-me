@@ -2,7 +2,7 @@ import streamlit as st
 from elasticsearch import Elasticsearch
 from sentence_transformers import SentenceTransformer
 import time
-from jina_reranker import JinaReranker # NEW: Import Jina Reranker SDK
+# Removed: from jina_reranker import JinaReranker # THIS IS NO LONGER USED
 
 st.set_page_config(
     page_title="Amazon Kids Product Search",
@@ -10,14 +10,14 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- NEW: Get JINA_API_KEY from Streamlit secrets ---
+# Credentials from Streamlit secrets
 try:
     CLOUD_ID = st.secrets["CLOUD_ID"]
     USERNAME = st.secrets["USERNAME"]
     PASSWORD = st.secrets["PASSWORD"]
-    JINA_API_KEY = st.secrets["JINA_API_KEY"] # NEW: Fetch Jina API Key
-except KeyError as e:
-    st.error(f"⚠️ Missing secret: '{e}'. Please configure CLOUD_ID, USERNAME, PASSWORD, and JINA_API_KEY in Streamlit Cloud dashboard.")
+    # Removed: JINA_API_KEY = st.secrets["JINA_API_KEY"] # No longer needed for internal reranker
+except KeyError as e: # Changed from generic 'except' to specific 'KeyError'
+    st.error(f"⚠️ Missing secret: '{e}'. Please configure CLOUD_ID, USERNAME, and PASSWORD in Streamlit Cloud dashboard.")
     st.stop()
 
 INDEX_NAME = "amazon_2020_bbq"
@@ -34,17 +34,11 @@ def init_elasticsearch():
 def init_model():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-# NEW: Initialize Jina Reranker client (cached)
-@st.cache_resource
-def init_jina_reranker(api_key):
-    if not api_key:
-        st.error("Jina AI API Key is required for the 'Full Pipeline' search method.")
-        st.stop()
-    return JinaReranker(api_key=api_key)
+# Removed: init_jina_reranker function # No longer needed
+# Removed: jina_reranker_client = init_jina_reranker(JINA_API_KEY) # No longer needed
 
 client = init_elasticsearch()
 model = init_model()
-jina_reranker_client = init_jina_reranker(JINA_API_KEY) # Pass the fetched key
 
 # Search functions
 def bm25_search(query, k=10):
@@ -117,102 +111,60 @@ def hybrid_rrf_search(query, k=10):
     )
     return response["hits"]["hits"]
 
-# --- REWRITTEN: full_pipeline_search to use external Jina AI API ---
-def full_pipeline_search(query, k=10, num_candidates_for_reranker=50):
-    """
-    Performs a 3-stage search: Hybrid RRF -> Jina AI Reranker -> Top K.
-    num_candidates_for_reranker: Number of candidates to retrieve from Elasticsearch
-                                 before sending to Jina AI for reranking.
-    """
-    if not JINA_API_KEY:
-        st.error("Jina AI API Key is not configured. 'Full Pipeline' search cannot be used.")
-        return []
-
+# --- REVERTED AND FIXED: full_pipeline_search to use internal Elasticsearch reranker ---
+def full_pipeline_search(query, k=10):
     query_vector = model.encode(query).tolist()
-
-    # Stage 1: Hybrid RRF to get initial candidates
-    # We need to retrieve 'document_text' as it will be sent to Jina AI
-    rrf_response = client.search(
+    response = client.search(
         index=INDEX_NAME,
         body={
-            "size": num_candidates_for_reranker, # Retrieve more candidates for Jina AI
+            "size": k,
             "retriever": {
-                "rrf": {
-                    "retrievers": [
-                        {
-                            "standard": {
-                                "query": {
-                                    "multi_match": {
-                                        "query": query,
-                                        "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
+                "text_similarity_reranker": {
+                    "retriever": {
+                        "rrf": {
+                            "retrievers": [
+                                {
+                                    "standard": {
+                                        "query": {
+                                            "multi_match": {
+                                                "query": query,
+                                                "fields": ["product_name^3", "brand^2", "category^1.5", "document_text"]
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    "knn": {
+                                        "field": "embedding",
+                                        "query_vector": query_vector,
+                                        "k": 50,
+                                        "num_candidates": 100
                                     }
                                 }
-                            }
-                        },
-                        {
-                            "knn": {
-                                "field": "embedding",
-                                "query_vector": query_vector,
-                                "k": num_candidates_for_reranker, # knn also retrieves more
-                                "num_candidates": 100
-                            }
+                            ],
+                            "rank_window_size": 100
                         }
-                    ],
-                    "rank_window_size": num_candidates_for_reranker # RRF considers this many
+                    },
+                    "field": "document_text",
+                    "inference_id": "jina_reranker_v3",
+                    "inference_text": query,
+                    "rank_window_size": 50
                 }
             },
-            # IMPORTANT: Include 'document_text' to send to Jina AI
+            # IMPORTANT FIX: Include 'document_text' so the internal reranker can use it
             "_source": ["product_name", "brand", "price", "category", "image_url", "document_text"]
         }
     )
-
-    initial_hits = rrf_response["hits"]["hits"]
-
-    if not initial_hits:
-        return [] # No initial hits, nothing to rerank
-
-    # Stage 2: Jina AI Reranking
-    documents_to_rerank = [hit["_source"]["document_text"] for hit in initial_hits]
-
-    try:
-        # Use the global JinaReranker client
-        rerank_results = jina_reranker_client.rerank(
-            query=query,
-            documents=documents_to_rerank,
-            top_n=k # Request Jina to return scores for the top 'k' final results
-        )
-    except Exception as e:
-        st.error(f"Error during Jina AI reranking: {e}. Please ensure your JINA_API_KEY is valid and there's network access to Jina AI.")
-        st.warning("Falling back to Hybrid RRF results without reranking due to error.")
-        # Fallback: if reranking fails, just return the top k from RRF based on ES score
-        return sorted(initial_hits, key=lambda x: x['_score'], reverse=True)[:k]
-
-    # Stage 3: Map Jina scores back to original hits and sort
-    reranked_hits = []
-    # Jina's rerank_results contain `index` (original position in `documents_to_rerank`)
-    # and `relevance_score`. We use `index` to find the original ES hit.
-    for result in rerank_results:
-        original_index = result.index
-        relevance_score = result.relevance_score
-        hit = initial_hits[original_index]
-        hit['_score'] = relevance_score # Update Elasticsearch score with Jina's relevance score
-        reranked_hits.append(hit)
-
-    # The rerank_results from Jina are already sorted by relevance,
-    # and `top_n=k` ensures it only returns the best ones.
-    # We sort again here for explicit clarity and safety.
-    final_results = sorted(reranked_hits, key=lambda x: x['_score'], reverse=True)[:k]
-
-    return final_results
-# --- END REWRITTEN full_pipeline_search ---
+    return response["hits"]["hits"]
+# --- END REVERTED AND FIXED full_pipeline_search ---
 
 
 # UI
 st.title("🎨 Amazon Kids Product Search")
-st.markdown("### Powered by BBQ Quantization + Hybrid RRF + **External JinaAI Reranker**") # Adjusted description
+st.markdown("### Powered by BBQ Quantization + Hybrid RRF + **Elasticsearch's Internal JinaAI Reranker**") # Adjusted description
 st.markdown("---")
 
-# --- NEW: Add empty query check ---
+# --- NEW: Add empty query check (moved to top of interaction flow) ---
 query = st.text_input(
     "Search for kids products:",
     value=st.session_state.get("query", ""),
@@ -307,7 +259,7 @@ if comparison_mode: # 'query' check already done above
             st.caption(f"${s.get('price', 0):.2f}")
 
     st.markdown("---")
-    st.success("💡 Full Pipeline reranks for maximum relevance using Jina AI!")
+    st.success("💡 Full Pipeline reranks for maximum relevance using Elasticsearch's internal Jina AI!")
 
 # Single method mode
 elif not comparison_mode and search_method: # 'query' check already done above
@@ -361,15 +313,15 @@ elif not comparison_mode and search_method: # 'query' check already done above
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📊 Architecture")
 st.sidebar.markdown("""
-**3-Stage Pipeline (External Jina AI):**
-1. Hybrid RRF (BM25 + Vector) from Elasticsearch (fetches more candidates with `document_text`)
-2. **External Jina AI Reranker** (re-ranks candidates via API call)
+**3-Stage Pipeline (Elasticsearch Internal Reranker):**
+1. Hybrid RRF (BM25 + Vector) from Elasticsearch
+2. **Elasticsearch's Internal `text_similarity_reranker` (`jina_reranker_v3`)**
 3. Final Top K Results
 
 **Features:**
 - BBQ int8_hnsw (75% savings) in Elasticsearch
 - Semantic + keyword fusion (Hybrid RRF)
-- Cross-encoder reranking (Jina AI)
+- Cross-encoder reranking (via Elasticsearch's ML features)
 """)
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Elastic Blogathon 2026**")
