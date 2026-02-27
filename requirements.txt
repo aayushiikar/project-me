@@ -2,4 +2,4 @@ streamlit
 elasticsearch
 sentence-transformers
 tqdm
-jina-reranker # Only if you implemented the external Jina AI API call
+jina # THIS IS THE CORRECT PACKAGE NAME for Jina AI SDK
