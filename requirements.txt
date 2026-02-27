@@ -2,4 +2,4 @@ streamlit
 elasticsearch
 sentence-transformers
 tqdm
-jina # THIS IS THE CORRECT PACKAGE NAME for Jina AI SDK
+jina-reranker==1.0.0 # Or a newer stable version if you know one, but 1.0.0 is a good starting point
